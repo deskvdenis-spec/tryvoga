@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Статус тривоги</title>
+<style>
+  :root {
+    --bg: #4a4f55;
+    --fg: #ffffff;
+    --fg-soft: rgba(255, 255, 255, .78);
+  }
+  body[data-state="setup"]  { --bg: #2b2f35; }
+  body[data-state="green"]  { --bg: #1b8a4b; }
+  body[data-state="yellow"] { --bg: #f2b705; --fg: #1d1600; --fg-soft: rgba(29, 22, 0, .75); }
+  body[data-state="red"]    { --bg: #d11f1f; }
+  body[data-state="red"] .status { animation: pulse 1.6s ease-in-out infinite; }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    transition: background-color .6s ease;
+  }
+  .screen {
+    min-height: 100%;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; padding: 24px 24px 72px;
+  }
+  .screen[hidden] { display: none; }
+  #view { cursor: pointer; }
+
+  .place { font-size: clamp(18px, 3vw, 32px); margin: 0 0 1.5vh; color: var(--fg-soft); }
+  .status { font-size: clamp(56px, 16vw, 220px); font-weight: 800; line-height: 1; margin: 0; letter-spacing: -.02em; }
+  .detail { font-size: clamp(18px, 3vw, 36px); margin: 3vh 0 0; max-width: 28em; color: var(--fg-soft); min-height: 1.4em; }
+
+  .timer { font-size: clamp(20px, 4vw, 44px); font-weight: 700; margin: 2vh 0 0; min-height: 1.2em; font-variant-numeric: tabular-nums; }
+
+  #setup h1 { font-size: clamp(24px, 4vw, 40px); margin: 0 0 24px; }
+  #setup label { display: block; width: min(420px, 100%); text-align: left; margin: 0 0 16px; font-size: 16px; color: var(--fg-soft); }
+  #setup select {
+    display: block; width: 100%; margin-top: 6px; padding: 12px; font-size: 18px;
+    border-radius: 8px; border: 1px solid #6b7280; background: #1f2328; color: #fff;
+  }
+  #start {
+    margin-top: 8px; padding: 14px 32px; font-size: 18px; font-weight: 700;
+    border: 0; border-radius: 8px; background: #1b8a4b; color: #fff; cursor: pointer;
+  }
+  #start:focus-visible, #change:focus-visible, #setup select:focus-visible { outline: 3px solid #fff; outline-offset: 2px; }
+
+  #change {
+    position: fixed; top: 12px; right: 12px; z-index: 2;
+    padding: 8px 12px; font-size: 14px; border-radius: 6px; cursor: pointer;
+    border: 1px solid var(--fg-soft); background: transparent; color: var(--fg-soft);
+  }
+  #change[hidden] { display: none; }
+
+  footer {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    padding: 12px 16px calc(12px + env(safe-area-inset-bottom, 0px));
+    font-size: 14px; text-align: center; color: var(--fg-soft);
+  }
+  footer a { color: inherit; }
+  @keyframes pulse { 50% { opacity: .72; } }
+  @media (prefers-reduced-motion: reduce) {
+    body[data-state="red"] .status { animation: none; }
+    body { transition: none; }
+  }
+</style>
+</head>
+<body data-state="setup">
+
+  <button id="change" type="button" hidden>Змінити район</button>
+
+  <section id="setup" class="screen">
+    <h1>Де стежити за тривогою?</h1>
+    <label>Область
+      <select id="selOblast"></select>
+    </label>
+    <label>Район
+      <select id="selRaion"></select>
+    </label>
+    <button id="start" type="button">Показати статус</button>
+  </section>
+
+  <main id="view" class="screen" hidden>
+    <p class="place" id="place"></p>
+    <h1 class="status" id="status" aria-live="polite">…</h1>
+    <p class="detail" id="detail">Завантаження даних</p>
+    <p class="timer" id="timer"></p>
+  </main>
+
+  <footer>
+    © 2026 Denys Kolesnyk ·
+    <span id="updated"></span>
+    <a href="https://neptun.in.ua/">Дані: Карта повітряних тривог — NEPTUN</a> ·
+    Не замінює офіційні сигнали тривоги
+  </footer>
+
+<script>
+(() => {
+  // ---- Налаштування ----
+  const API = "https://neptun.in.ua";
+  const POLL_MS = 10000;     // не частіше ніж раз на 5 секунд (вимога API)
+  const STALE_MS = 45000;    // якщо дані не оновлювалися довше — показати «немає зв'язку»
+  const STORE_KEY = "tryvoga.selection";
+
+  // ---- Довідник: області та райони ----
+  // Район: "Назва" або ["Назва", "дод. основа пошуку", ...] (для перейменованих).
+  // Основа пошуку за замовчуванням — назва без закінчення «ий».
+  const OBLASTS = [
+    { name: "Вінницька область", stem: "вінницьк", raions: ["Вінницький","Гайсинський","Жмеринський","Могилів-Подільський","Тульчинський","Хмільницький"] },
+    { name: "Волинська область", stem: "волинськ", raions: ["Володимирський","Камінь-Каширський","Ковельський","Луцький"] },
+    { name: "Дніпропетровська область", stem: "дніпропетровськ", raions: ["Дніпровський","Кам'янський","Криворізький","Нікопольський","Павлоградський",["Самарівський","новомосковськ"],"Синельниківський"] },
+    { name: "Донецька область", stem: "донецьк", raions: ["Бахмутський","Волноваський","Горлівський","Донецький","Кальміуський","Краматорський","Маріупольський","Покровський"] },
+    { name: "Житомирська область", stem: "житомирськ", raions: ["Бердичівський","Житомирський","Коростенський",["Звягельський","новоград-волинськ"]] },
+    { name: "Закарпатська область", stem: "закарпатськ", raions: ["Берегівський","Мукачівський","Рахівський","Тячівський","Ужгородський","Хустський"] },
+    { name: "Запорізька область", stem: "запорізьк", raions: ["Бердянський","Василівський","Запорізький","Мелітопольський","Пологівський"] },
+    { name: "Івано-Франківська область", stem: "івано-франківськ", raions: ["Верховинський","Івано-Франківський","Калуський","Коломийський","Косівський","Надвірнянський"] },
+    { name: "Київська область", stem: "київськ", raions: ["Білоцерківський","Бориспільський","Броварський","Бучанський","Вишгородський","Обухівський","Фастівський"] },
+    { name: "Кіровоградська область", stem: "кіровоградськ", raions: ["Голованівський","Кропивницький","Новоукраїнський","Олександрійський"] },
+    { name: "Луганська область", stem: "луганськ", raions: ["Алчевський","Довжанський","Луганський","Ровеньківський","Сватівський","Старобільський","Сєвєродонецький","Щастинський"] },
+    { name: "Львівська область", stem: "львівськ", raions: ["Дрогобицький","Золочівський","Львівський","Самбірський","Стрийський","Червоноградський","Яворівський"] },
+    { name: "Миколаївська область", stem: "миколаївськ", raions: ["Баштанський","Вознесенський","Миколаївський","Первомайський"] },
+    { name: "Одеська область", stem: "одеськ", raions: ["Березівський","Білгород-Дністровський","Болградський","Ізмаїльський","Одеський","Подільський","Роздільнянський"] },
+    { name: "Полтавська область", stem: "полтавськ", raions: ["Кременчуцький","Лубенський","Миргородський","Полтавський"] },
+    { name: "Рівненська область", stem: "рівненськ", raions: ["Вараський","Дубенський","Рівненський","Сарненський"] },
+    { name: "Сумська область", stem: "сумськ", raions: ["Конотопський","Охтирський","Роменський","Сумський","Шосткинський"] },
+    { name: "Тернопільська область", stem: "тернопільськ", raions: ["Кременецький","Тернопільський","Чортківський"] },
+    { name: "Харківська область", stem: "харківськ", raions: ["Берестинський","Богодухівський","Ізюмський","Куп'янський","Лозівський","Харківський","Чугуївський"] },
+    { name: "Херсонська область", stem: "херсонськ", raions: ["Бериславський","Генічеський","Каховський","Скадовський","Херсонський"] },
+    { name: "Хмельницька область", stem: "хмельницьк", raions: ["Кам'янець-Подільський","Хмельницький","Шепетівський"] },
+    { name: "Черкаська область", stem: "черкаськ", raions: ["Звенигородський","Золотоніський","Уманський","Черкаський"] },
+    { name: "Чернівецька область", stem: "чернівецьк", raions: ["Вижницький","Дністровський","Чернівецький"] },
+    { name: "Чернігівська область", stem: "чернігівськ", raions: ["Корюківський","Ніжинський","Новгород-Сіверський","Прилуцький","Чернігівський"] },
+    { name: "АР Крим", stem: "крим", raions: [] },
+    { name: "м. Київ", test: (n) => n === "київ" || n.startsWith("мкиїв") || n.startsWith("містокиїв"), raions: [] },
+  ];
+
+  // ---- Утиліти ----
+  const norm = (s) => String(s || "").toLowerCase().replace(/['’ʼ`‘\-\s.]/g, "");
+  const WHOLE = "Уся область";
+
+  function oblastTest(o) {
+    if (o.test) return o.test;
+    const stem = norm(o.stem);
+    return (n) => n.includes(stem);
+  }
+  function raionDef(entry) {
+    const [name, ...extra] = Array.isArray(entry) ? entry : [entry];
+    const stems = [norm(name).slice(0, -2), ...extra.map(norm)];
+    return { name, stems };
+  }
+  const matchStems = (stems, text) => { const n = norm(text); return stems.some((s) => n.includes(s)); };
+
+  // ---- Елементи ----
+  const $ = (id) => document.getElementById(id);
+  const $setup = $("setup"), $view = $("view"), $change = $("change");
+  const $selO = $("selOblast"), $selR = $("selRaion");
+  const $place = $("place"), $status = $("status"), $detail = $("detail"), $updated = $("updated"), $timer = $("timer");
+
+  const STATES = {
+    red:     { title: "ТРИВОГА",    tag: "🔴" },
+    yellow:  { title: "УВАГА",   tag: "🟡" },
+    green:   { title: "ВІДБІЙ",   tag: "🟢" },
+    unknown: { title: "НЕМАЄ ДАНИХ", tag: "⚪" },
+  };
+
+  let sel = null;        // { oblast: об'єкт, raion: {name, stems} | null }
+  let timer = null;
+  let lastOk = 0;
+  let alertSince = null;   // мс: коли почалась тривога (за даними API)
+  let clockSkew = 0;       // різниця між годинником сервера й телефону
+
+  // ---- Вибір області / району ----
+  OBLASTS.forEach((o, i) => $selO.add(new Option(o.name, i)));
+
+  function fillRaions() {
+    const o = OBLASTS[$selO.value];
+    $selR.length = 0;
+    $selR.add(new Option(WHOLE, ""));
+    o.raions.forEach((r, i) => $selR.add(new Option(raionDef(r).name + " район", i)));
+    $selR.disabled = o.raions.length === 0;
+  }
+  $selO.addEventListener("change", fillRaions);
+
+  function saveSelection(oName, rName) {
+    try { localStorage.setItem(STORE_KEY, JSON.stringify({ o: oName, r: rName })); } catch (e) {}
+  }
+  function loadSelection() {
+    try {
+      const v = JSON.parse(localStorage.getItem(STORE_KEY) || "null");
+      if (!v) return null;
+      const oi = OBLASTS.findIndex((o) => o.name === v.o);
+      if (oi < 0) return null;
+      let ri = "";
+      if (v.r) {
+        const found = OBLASTS[oi].raions.findIndex((r) => raionDef(r).name === v.r);
+        if (found >= 0) ri = found;
+      }
+      return { oi, ri };
+    } catch (e) { return null; }
+  }
+
+  function startMonitoring(oi, ri) {
+    const oblast = OBLASTS[oi];
+    const raion = ri === "" ? null : raionDef(oblast.raions[ri]);
+    sel = { oblast, raion, test: oblastTest(oblast) };
+    saveSelection(oblast.name, raion ? raion.name : "");
+
+    $place.textContent = raion ? `${oblast.name} · ${raion.name} район` : `${oblast.name} · уся область`;
+    document.body.dataset.state = "unknown";
+    $status.textContent = "…";
+    $detail.textContent = "Завантаження даних";
+    $setup.hidden = true;
+    $view.hidden = false;
+    $change.hidden = false;
+    lastOk = 0;
+    alertSince = null;
+
+    clearInterval(timer);
+    tick();
+    timer = setInterval(tick, POLL_MS);
+  }
+
+  function showSetup() {
+    clearInterval(timer);
+    $view.hidden = true;
+    $change.hidden = true;
+    $setup.hidden = false;
+    document.body.dataset.state = "setup";
+    document.title = "Статус тривоги";
+  }
+
+  $("start").addEventListener("click", () => startMonitoring(Number($selO.value), $selR.value === "" ? "" : Number($selR.value)));
+  $change.addEventListener("click", showSetup);
+
+  // Клік по екрану статусу — повноекранний режим
+  $view.addEventListener("click", () => {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else document.documentElement.requestFullscreen?.().catch(() => {});
+  });
+
+  // ---- Логіка статусу ----
+  function evaluate(alerts, threats) {
+    const { raion, test } = sel;
+    const inObl = (name, oblastName) => test(norm(name)) || test(norm(oblastName));
+
+    const raionsInOblast = (alerts.raions || []).filter((r) => test(norm(r.oblast)));
+    const oblastItems = (alerts.oblasts || []).filter((o) => inObl(o.name, o.oblast));
+    const raionItems = raion ? raionsInOblast.filter((r) => matchStems(raion.stems, r.name)) : raionsInOblast;
+    const homeItems = oblastItems.concat(raionItems);
+    const homeAlert = homeItems.length > 0;
+    // Час початку: найраніший із відповідних записів
+    let since = null;
+    homeItems.forEach((m) => {
+      const ms = Date.parse(m.since);
+      if (!isNaN(ms) && (since === null || ms < since)) since = ms;
+    });
+
+    // 🟢 У вашому районі тривоги немає (навіть якщо вона є в сусідніх)
+    if (!homeAlert) {
+      if (raionsInOblast.length) {
+        const names = raionsInOblast.map((r) => r.name).slice(0, 3).join(", ");
+        return { state: "green", detail: `Відбій у вашому районі. Тривога в сусідніх районах: ${names}${raionsInOblast.length > 3 ? " та ін." : ""}` };
+      }
+      return { state: "green", detail: "Відбій. Усе добре — тривоги в області немає." };
+    }
+
+    // Тривога є: рівень залежить від того, чи зафіксована активна загроза.
+    // Якщо дані про загрози недоступні — вважаємо, що небезпека є.
+    let danger = true;
+    if (threats) {
+      danger = threats.some((t) => {
+        if (t.advisory || (t.status && t.status !== "active")) return false;
+        if (!test(norm(t.region))) return false;
+        if (!raion || t.areaOnly || !t.district) return true;
+        return matchStems(raion.stems, t.district);
+      });
+    }
+    const where = raion ? "у вашому районі" : "в області";
+    return danger
+      ? { state: "red", detail: `Повітряна тривога, ${where} зафіксовано загрозу. Прямуйте в укриття.`, since: since }
+      : { state: "yellow", detail: `Триває повітряна тривога. Перебувайте в укритті: ${where} жовтий рівень небезпеки.`, since: since };
+  }
+
+  function render(state, detail) {
+    document.body.dataset.state = state;
+    $status.textContent = STATES[state].title;
+    $detail.textContent = detail;
+    document.title = `${STATES[state].tag} ${STATES[state].title} — ${sel.raion ? sel.raion.name + " район" : sel.oblast.name}`;
+  }
+
+  async function getJson(path) {
+    const res = await fetch(API + path, { cache: "no-store" });
+    if (!res.ok) throw new Error(path + " → " + res.status);
+    return res.json();
+  }
+
+  function pad(n) { return (n < 10 ? "0" : "") + n; }
+
+  function updateTimer() {
+    const st = document.body.dataset.state;
+    if (alertSince === null || (st !== "red" && st !== "yellow")) { $timer.textContent = ""; return; }
+    let sec = Math.floor((Date.now() + clockSkew - alertSince) / 1000);
+    if (sec < 0) sec = 0;
+    $timer.textContent = "Тривога триває: " + pad(Math.floor(sec / 3600)) + ":" + pad(Math.floor(sec / 60) % 60) + ":" + pad(sec % 60);
+  }
+  setInterval(updateTimer, 1000);
+
+  async function tick() {
+    const mySel = sel;
+    try {
+      const [aRes, tRes] = await Promise.allSettled([
+        getJson("/api/v1/alerts"),
+        getJson("/api/v1/threats"),
+      ]);
+      if (aRes.status !== "fulfilled") throw aRes.reason;
+      const alerts = aRes.value;
+      const threats = tRes.status === "fulfilled" ? (tRes.value.threats || []) : null;
+      if (tRes.status === "fulfilled") {
+        const sv = Date.parse(tRes.value.serverTime);
+        if (!isNaN(sv)) clockSkew = sv - Date.now();
+      }
+      if (mySel !== sel) return;   // користувач встиг змінити район
+      const result = evaluate(alerts, threats);
+      lastOk = Date.now();
+      alertSince = result.since === undefined ? null : result.since;
+      render(result.state, result.detail);
+      updateTimer();
+      $updated.textContent = "Оновлено " + new Date(lastOk).toLocaleTimeString("uk-UA") + " ·";
+    } catch (err) {
+      console.error(err);
+      const errText = (err && err.message) ? err.message : String(err);
+      if (mySel === sel && Date.now() - (lastOk || 0) > STALE_MS) {
+        // Не показуємо «зелений», якщо даних немає
+        render("unknown", "Немає зв'язку з джерелом даних. Орієнтуйтеся на офіційні сигнали." + " [" + errText + "]");
+      }
+    }
+  }
+
+  // ---- Старт ----
+  const saved = loadSelection();
+  if (saved) {
+    $selO.value = saved.oi;
+    fillRaions();
+    $selR.value = saved.ri;
+    startMonitoring(saved.oi, saved.ri);
+  } else {
+    $selO.value = OBLASTS.findIndex((o) => o.name === "Дніпропетровська область");
+    fillRaions();
+    showSetup();
+  }
+})();
+</script>
+</body>
+</html>
