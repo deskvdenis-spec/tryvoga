@@ -172,7 +172,6 @@
   let timer = null;
   let lastOk = 0;
   let alertSince = null;   // мс: коли почалась тривога (за даними API)
-  let clockSkew = 0;       // різниця між годинником сервера й телефону
 
   // ---- Вибір області / району ----
   OBLASTS.forEach((o, i) => $selO.add(new Option(o.name, i)));
@@ -244,7 +243,7 @@
   });
 
   // ---- Логіка статусу ----
-  function evaluate(alerts, threats) {
+  function evaluate(alerts) {
     const { raion, test } = sel;
     const inObl = (name, oblastName) => test(norm(name)) || test(norm(oblastName));
 
@@ -269,21 +268,25 @@
       return { state: "green", detail: "Відбій. Усе добре — тривоги в області немає." };
     }
 
-    // Тривога є: рівень залежить від того, чи зафіксована активна загроза.
-    // Якщо дані про загрози недоступні — вважаємо, що небезпека є.
-    let danger = true;
-    if (threats) {
-      danger = threats.some((t) => {
-        if (t.advisory || (t.status && t.status !== "active")) return false;
-        if (!test(norm(t.region))) return false;
-        if (!raion || t.areaOnly || !t.district) return true;
-        return matchStems(raion.stems, t.district);
-      });
-    }
+    // Рівень береться прямо з API: поле level ("yellow" / "red").
+    // Невідоме або відсутнє значення вважаємо червоним — так безпечніше.
+    const levelOf = (m) => (String(m.level || "").toLowerCase() === "yellow" ? "yellow" : "red");
+    const isRed = homeItems.some((m) => levelOf(m) === "red");
     const where = raion ? "у вашому районі" : "в області";
-    return danger
-      ? { state: "red", detail: `Повітряна тривога, ${where} зафіксовано загрозу. Прямуйте в укриття.`, since: since }
-      : { state: "yellow", detail: `Триває повітряна тривога. Перебувайте в укритті: ${where} жовтий рівень небезпеки.`, since: since };
+    // Причини з API (наприклад, «Дронова загроза»), без дужок із рівнем
+    const level = isRed ? "red" : "yellow";
+    const reasons = [];
+    homeItems.forEach((m) => {
+      if (levelOf(m) !== level || !m.reasons) return;
+      m.reasons.forEach((r) => {
+        const txt = String(r).replace(/\s*\([^)]*\)\s*$/, "");
+        if (txt && reasons.indexOf(txt) < 0) reasons.push(txt);
+      });
+    });
+    const why = reasons.length ? " " + reasons.slice(0, 2).join("; ") + "." : "";
+    return isRed
+      ? { state: "red", detail: `Триває повітряна тривога. Прямуйте в укриття: ${where} червоний рівень небезпеки.${why}`, since: since }
+      : { state: "yellow", detail: `Триває повітряна тривога. Перебувайте в укритті: ${where} жовтий рівень небезпеки.${why}`, since: since };
   }
 
   function render(state, detail) {
@@ -304,7 +307,7 @@
   function updateTimer() {
     const st = document.body.dataset.state;
     if (alertSince === null || (st !== "red" && st !== "yellow")) { $timer.textContent = ""; return; }
-    let sec = Math.floor((Date.now() + clockSkew - alertSince) / 1000);
+    let sec = Math.floor((Date.now() - alertSince) / 1000);
     if (sec < 0) sec = 0;
     $timer.textContent = "Тривога триває: " + pad(Math.floor(sec / 3600)) + ":" + pad(Math.floor(sec / 60) % 60) + ":" + pad(sec % 60);
   }
@@ -313,19 +316,9 @@
   async function tick() {
     const mySel = sel;
     try {
-      const [aRes, tRes] = await Promise.allSettled([
-        getJson("/api/v1/alerts"),
-        getJson("/api/v1/threats"),
-      ]);
-      if (aRes.status !== "fulfilled") throw aRes.reason;
-      const alerts = aRes.value;
-      const threats = tRes.status === "fulfilled" ? (tRes.value.threats || []) : null;
-      if (tRes.status === "fulfilled") {
-        const sv = Date.parse(tRes.value.serverTime);
-        if (!isNaN(sv)) clockSkew = sv - Date.now();
-      }
+      const alerts = await getJson("/api/v1/alerts");
       if (mySel !== sel) return;   // користувач встиг змінити район
-      const result = evaluate(alerts, threats);
+      const result = evaluate(alerts);
       lastOk = Date.now();
       alertSince = result.since === undefined ? null : result.since;
       render(result.state, result.detail);
