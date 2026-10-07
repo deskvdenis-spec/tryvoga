@@ -218,6 +218,7 @@
     $change.hidden = false;
     lastOk = 0;
     alertSince = null;
+    keepAwake();
 
     clearInterval(timer);
     tick();
@@ -333,6 +334,23 @@
       }
     }
   }
+
+  // ---- Не даємо екрану згасати (Screen Wake Lock) ----
+  // Працює в сучасних браузерах; у старих просто нічого не станеться.
+  let wakeLock = null;
+  async function keepAwake() {
+    try {
+      if (!("wakeLock" in navigator) || wakeLock) return;
+      wakeLock = await navigator.wakeLock.request("screen");
+      wakeLock.addEventListener("release", () => { wakeLock = null; });
+    } catch (e) { wakeLock = null; }
+  }
+  // Після повернення на вкладку блокування треба запитати знову
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") keepAwake();
+  });
+  // Деякі браузери дозволяють це лише після дотику/кліку
+  document.addEventListener("click", keepAwake);
 
   // ---- Старт ----
   const saved = loadSelection();
