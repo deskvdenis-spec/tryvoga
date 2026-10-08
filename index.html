@@ -63,6 +63,8 @@
     font-size: 14px; text-align: center; color: var(--fg-soft);
   }
   footer a { color: inherit; }
+  footer a.author { text-decoration: none; }
+  footer a.author:hover, footer a.author:focus-visible { text-decoration: underline; }
   @keyframes pulse { 50% { opacity: .72; } }
   @media (prefers-reduced-motion: reduce) {
     body[data-state="red"] .status { animation: none; }
@@ -93,7 +95,7 @@
   </main>
 
   <footer>
-    © 2026 Denys Kolesnyk ·
+    © 2026 <a class="author" href="https://deskvdenis.blogspot.com" target="_blank" rel="noopener">Denys Kolesnyk</a> ·
     <span id="updated"></span>
     <a href="https://neptun.in.ua/">Дані: Карта повітряних тривог — NEPTUN</a> ·
     Не замінює офіційні сигнали тривоги
